@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
+from fastapi.responses import JSONResponse
 from app.routers import auth, tickets, users
 from app.config import settings
 from app.database import engine, Base
@@ -10,35 +11,55 @@ import asyncio
 from contextlib import asynccontextmanager
 from app.sync import periodic_sync
 import logging
+import traceback
+from app.logging_config import configure_logging, get_logger
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-)
-logger = logging.getLogger("app.main")
+# Configure logging
+configure_logging()
+
+# Get logger for this module
+logger = get_logger("app.main")
 
 # Background task setup
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Start background task for periodic sync
-    sync_task = asyncio.create_task(periodic_sync())
-    logger.info("Started background sync task")
-    
-    yield
-    
-    # Stop background task
-    sync_task.cancel()
     try:
-        await sync_task
-    except asyncio.CancelledError:
-        logger.info("Background sync task cancelled")
+        sync_task = asyncio.create_task(periodic_sync())
+        logger.info("Started background sync task")
+        
+        yield
+        
+        # Stop background task
+        sync_task.cancel()
+        try:
+            await sync_task
+        except asyncio.CancelledError:
+            logger.info("Background sync task cancelled")
+    except Exception as e:
+        logger.error(f"Error in lifespan: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise
 
 app = FastAPI(
     title="Healthcare Diagnostic Test Booking Support System",
     version="0.1.0",
     lifespan=lifespan
 )
+
+# Global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # Log the error with traceback
+    error_msg = f"Unhandled exception: {str(exc)}"
+    logger.error(error_msg)
+    logger.error(traceback.format_exc())
+    
+    # Return a clean response to the client
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error. Please try again later."}
+    )
 
 # Include routers
 app.include_router(auth.router, tags=["Authentication"])
@@ -47,10 +68,16 @@ app.include_router(tickets.router, prefix="/api/tickets", tags=["Tickets"])
 
 @app.on_event("startup")
 async def startup():
-    # Create tables
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables created")
+    try:
+        # Create tables
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Database tables created")
+    except Exception as e:
+        logger.error(f"Database initialization error: {str(e)}")
+        logger.error(traceback.format_exc())
+        # Don't re-raise to allow app to start even if DB init fails
+        # Admin can fix the DB issue while app is running
 
 @app.get("/")
 def read_root():

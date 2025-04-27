@@ -109,47 +109,79 @@ async def sync_tickets(
 async def sync_tickets_for_user(db: AsyncSession, current_user: models.User):
     """Sync tickets for a specific user"""
     try:
+        if odoo_helpdesk is None:
+            logger.error(f"Cannot sync tickets for user {current_user.username}: Odoo connection not available")
+            return
+            
         # Find partner_id for this user
-        partner_id = await get_partner_id_for_user(current_user)
-        if not partner_id:
-            logger.warning(f"No Odoo partner found for user {current_user.username}")
+        try:
+            partner_id = await get_partner_id_for_user(current_user)
+            if not partner_id:
+                logger.warning(f"No Odoo partner found for user {current_user.username}")
+                return
+        except Exception as e:
+            logger.error(f"Error finding partner ID for user {current_user.username}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return
             
         # Get tickets from Odoo for this partner
-        odoo_tickets = odoo_helpdesk.get_tickets(
-            domain=[('partner_id', '=', partner_id)],
-            fields=['name', 'description', 'priority', 'stage_id', 'partner_id']
-        )
+        try:
+            odoo_tickets = odoo_helpdesk.get_tickets(
+                domain=[('partner_id', '=', partner_id)],
+                fields=['name', 'description', 'priority', 'stage_id', 'partner_id']
+            )
+            logger.info(f"Found {len(odoo_tickets)} tickets in Odoo for user {current_user.username}")
+        except Exception as e:
+            logger.error(f"Error retrieving tickets from Odoo for partner {partner_id}: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return
         
         # Sync each ticket
+        success_count = 0
+        error_count = 0
         for odoo_ticket in odoo_tickets:
-            # Check if we already have this ticket
-            db_ticket = await crud.get_ticket_by_odoo_id(db, odoo_ticket['id'])
-            if db_ticket:
-                # Update existing ticket
-                await sync_ticket_from_odoo(db, db_ticket, odoo_ticket['id'])
-            else:
-                # Create new ticket
-                new_ticket = models.TicketCreate(
-                    name=odoo_ticket['name'],
-                    description=odoo_ticket.get('description', ''),
-                    priority=odoo_ticket.get('priority', '1'),
-                    user_id=current_user.id
-                )
-                db_ticket = await crud.create_ticket(
-                    db, 
-                    new_ticket, 
-                    current_user.id, 
-                    odoo_ticket_id=odoo_ticket['id']
-                )
+            try:
+                # Check if we already have this ticket
+                db_ticket = await crud.get_ticket_by_odoo_id(db, odoo_ticket['id'])
+                if db_ticket:
+                    # Update existing ticket
+                    logger.debug(f"Updating existing ticket {db_ticket.id} from Odoo ID {odoo_ticket['id']}")
+                    await sync_ticket_from_odoo(db, db_ticket, odoo_ticket['id'])
+                else:
+                    # Create new ticket
+                    logger.info(f"Creating new ticket from Odoo ID {odoo_ticket['id']}")
+                    new_ticket = schemas.TicketCreate(
+                        name=odoo_ticket['name'],
+                        description=odoo_ticket.get('description', ''),
+                        priority=odoo_ticket.get('priority', '1'),
+                        user_id=current_user.id
+                    )
+                    db_ticket = await crud.create_ticket(
+                        db, 
+                        new_ticket, 
+                        current_user.id, 
+                        odoo_id=odoo_ticket['id']
+                    )
+                    
+                    # Sync messages for the new ticket
+                    await sync_ticket_messages(db, db_ticket, odoo_ticket['id'])
                 
-                # Sync messages for the new ticket
-                await sync_ticket_messages(db, db_ticket, odoo_ticket['id'])
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Error syncing Odoo ticket {odoo_ticket.get('id')}: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
+                # Continue with other tickets
         
         await db.commit()
-        logger.info(f"Synced {len(odoo_tickets)} tickets for user {current_user.username}")
+        logger.info(f"Synced {success_count} tickets for user {current_user.username} ({error_count} errors)")
     except Exception as e:
-        logger.error(f"Error syncing tickets for user: {str(e)}")
+        logger.error(f"Error syncing tickets for user {current_user.username}: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         await db.rollback()
 
 @router.post("/", response_model=schemas.Ticket)
