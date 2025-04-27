@@ -1,4 +1,3 @@
-
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -6,16 +5,12 @@ from passlib.context import CryptContext
 from pydantic import ValidationError
 from app import models, schemas, utils, crud
 from app.config import settings
-from app.database import get_db
+from app.database import get_db, AsyncSessionLocal
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime, timedelta
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-async def get_db() -> AsyncSession:
-    async with AsyncSessionLocal() as db:
-        yield db
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
