@@ -218,4 +218,86 @@ async def periodic_sync():
             logger.error(f"Error in periodic sync sleep: {str(e)}")
             logger.error(traceback.format_exc())
             # Still try to sleep to avoid tight loop
-            await asyncio.sleep(60) 
+            await asyncio.sleep(60)
+
+async def sync_messages_from_odoo(db: AsyncSession, ticket_id: int):
+    """Sync messages for a specific ticket from Odoo"""
+    try:
+        # Get the ticket
+        result = await db.execute(select(TicketORM).where(TicketORM.id == ticket_id))
+        ticket = result.scalars().first()
+        
+        if not ticket or not ticket.odoo_ticket_id:
+            logger.warning(f"Cannot sync messages: Ticket {ticket_id} not found or has no Odoo ID")
+            return
+            
+        # Use the existing sync_ticket_messages function
+        await sync_ticket_messages(db, ticket, ticket.odoo_ticket_id)
+        
+        # Update ticket timestamp
+        ticket.updated_at = datetime.utcnow()
+        await db.commit()
+        
+        logger.info(f"Successfully synced messages for ticket {ticket_id} from Odoo")
+    except SQLAlchemyError as e:
+        logger.error(f"Database error syncing messages for ticket {ticket_id}: {str(e)}")
+        logger.debug(traceback.format_exc())
+        await db.rollback()
+        raise
+    except Exception as e:
+        logger.error(f"Error syncing messages for ticket {ticket_id}: {str(e)}")
+        logger.debug(traceback.format_exc())
+        await db.rollback()
+        raise
+
+async def sync_all_tickets(db: AsyncSession):
+    """Sync all tickets from Odoo"""
+    if odoo_helpdesk is None:
+        logger.error("Cannot sync tickets from Odoo: Odoo connection not available")
+        return
+        
+    try:
+        # Get all tickets from Odoo
+        odoo_tickets = odoo_helpdesk.get_all_tickets()
+        
+        if not odoo_tickets:
+            logger.info("No tickets found in Odoo")
+            return
+            
+        # Process each Odoo ticket
+        for odoo_ticket in odoo_tickets:
+            try:
+                odoo_id = odoo_ticket.get('id')
+                if not odoo_id:
+                    continue
+                    
+                # Check if we already have this ticket
+                result = await db.execute(
+                    select(TicketORM).where(TicketORM.odoo_ticket_id == odoo_id)
+                )
+                ticket = result.scalars().first()
+                
+                if ticket:
+                    # Update existing ticket
+                    await sync_ticket_from_odoo(db, ticket, odoo_id)
+                else:
+                    # Create new ticket (simplified, would need user_id in real implementation)
+                    logger.info(f"Found new ticket in Odoo: {odoo_id} - {odoo_ticket.get('name')}")
+                    # Would create a new ticket here but we need more context
+            except Exception as e:
+                logger.error(f"Error processing Odoo ticket {odoo_ticket.get('id')}: {str(e)}")
+                logger.debug(traceback.format_exc())
+                # Continue with other tickets
+        
+        await db.commit()
+        logger.info(f"Completed syncing all tickets from Odoo")
+    except SQLAlchemyError as e:
+        logger.error(f"Database error during sync_all_tickets: {str(e)}")
+        logger.debug(traceback.format_exc())
+        await db.rollback()
+        raise
+    except Exception as e:
+        logger.error(f"Error during sync_all_tickets: {str(e)}")
+        logger.debug(traceback.format_exc())
+        await db.rollback()
+        raise 
